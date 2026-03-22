@@ -1,0 +1,24 @@
+# Terraform local files
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.backup
+*.tfplan
+*.tfplan.binary
+tfplan-*.json
+
+# Crash logs
+crash.log
+crash.*.log
+
+# Sensitive variable files — never commit these
+*.tfvars
+*.tfvars.json
+!example.tfvars
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
