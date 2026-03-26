@@ -1,0 +1,68 @@
+###############################################################
+# bootstrap.yml
+#
+# ONE-TIME ONLY workflow.
+# Creates the S3 bucket used for Terraform remote state.
+# Uses local state (no backend) because the bucket
+# does not exist yet when this runs.
+#
+# How to run:
+#   GitHub → Actions → Bootstrap S3 State Bucket → Run workflow
+#
+# After it runs successfully:
+#   1. Copy the bucket name from the workflow output
+#   2. Update all three backend.tf files with that bucket name
+#   3. Never run this workflow again
+###############################################################
+
+name: Bootstrap S3 State Bucket
+
+on:
+  workflow_dispatch:    # manual trigger only — never runs automatically
+
+jobs:
+  bootstrap:
+    name: Create S3 state bucket
+    runs-on: self-hosted
+    environment: dev    # uses dev environment — no approval needed
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.10.0"
+
+      - name: Confirm AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Terraform init (local state)
+        working-directory: bootstrap
+        run: terraform init
+
+      - name: Terraform validate
+        working-directory: bootstrap
+        run: terraform validate
+
+      - name: Terraform plan
+        working-directory: bootstrap
+        run: terraform plan -no-color
+
+      - name: Terraform apply
+        working-directory: bootstrap
+        run: terraform apply -auto-approve -no-color
+
+      - name: Print bucket name
+        working-directory: bootstrap
+        run: |
+          echo "================================================"
+          echo "S3 STATE BUCKET CREATED SUCCESSFULLY"
+          echo "================================================"
+          echo "Bucket name:"
+          terraform output state_bucket_name
+          echo "================================================"
+          echo "Next step: copy the bucket name above and update"
+          echo "all three backend.tf files with it."
+          echo "================================================"
