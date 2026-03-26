@@ -3,57 +3,95 @@
 #
 # ONE-TIME ONLY workflow.
 # Creates the S3 bucket used for Terraform remote state.
-# Uses local state (no backend) because the bucket
-# does not exist yet when this runs.
-#
-# How to run:
-#   GitHub → Actions → Bootstrap S3 State Bucket → Run workflow
-#
-# After it runs successfully:
-#   1. Copy the bucket name from the workflow output
-#   2. Update all three backend.tf files with that bucket name
-#   3. Never run this workflow again
 ###############################################################
 
 name: Bootstrap S3 State Bucket
 
 on:
-  workflow_dispatch:    # manual trigger only — never runs automatically
+  workflow_dispatch:
 
 jobs:
   bootstrap:
     name: Create S3 state bucket
     runs-on: self-hosted
-    environment: dev    # uses dev environment — no approval needed
+    environment: dev
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # -----------------------------
+      # Setup Terraform
+      # -----------------------------
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.10.0"
 
+      # -----------------------------
+      # Debug connectivity (optional)
+      # -----------------------------
+      - name: Debug network connectivity
+        run: |
+          echo "Testing registry..."
+          curl -I https://registry.terraform.io || true
+          echo "Testing releases..."
+          curl -I https://releases.hashicorp.com || true
+
+      # -----------------------------
+      # Setup Terraform plugin cache
+      # -----------------------------
+      - name: Setup Terraform cache
+        run: |
+          mkdir -p ~/.terraform.d/plugin-cache
+          echo 'plugin_cache_dir="$HOME/.terraform.d/plugin-cache"' > ~/.terraformrc
+
+      # -----------------------------
+      # Confirm AWS identity
+      # -----------------------------
       - name: Confirm AWS identity
         run: aws sts get-caller-identity
 
-      - name: Terraform init (local state)
+      # -----------------------------
+      # Terraform Init (FIXED)
+      # -----------------------------
+      - name: Terraform init (stable)
         working-directory: bootstrap
-        run: terraform init
+        run: |
+          export GODEBUG=http2client=0
+          export TF_REGISTRY_CLIENT_TIMEOUT=60
 
+          # Retry logic (handles transient failures)
+          for i in {1..3}; do
+            terraform init -parallelism=1 && break
+            echo "Retrying terraform init ($i)..."
+            sleep 5
+          done
+
+      # -----------------------------
+      # Terraform Validate
+      # -----------------------------
       - name: Terraform validate
         working-directory: bootstrap
         run: terraform validate
 
+      # -----------------------------
+      # Terraform Plan
+      # -----------------------------
       - name: Terraform plan
         working-directory: bootstrap
         run: terraform plan -no-color
 
+      # -----------------------------
+      # Terraform Apply
+      # -----------------------------
       - name: Terraform apply
         working-directory: bootstrap
         run: terraform apply -auto-approve -no-color
 
+      # -----------------------------
+      # Output bucket name
+      # -----------------------------
       - name: Print bucket name
         working-directory: bootstrap
         run: |
@@ -64,5 +102,5 @@ jobs:
           terraform output state_bucket_name
           echo "================================================"
           echo "Next step: copy the bucket name above and update"
-          echo "all three backend.tf files with it."
+          echo "all backend.tf files with it."
           echo "================================================"
