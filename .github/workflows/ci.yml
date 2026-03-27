@@ -45,7 +45,8 @@ jobs:
 
       - name: Checkov Scan
 #        run: checkov -d . --framework terraform --quiet
-        run: checkov -d . \
+        run: |
+            checkov -d . \
             --framework terraform \
             --quiet \
             --soft-fail-on MEDIUM,LOW \
