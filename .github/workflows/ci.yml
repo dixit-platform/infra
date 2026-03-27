@@ -44,7 +44,7 @@ jobs:
         run: trivy config . --severity HIGH,CRITICAL
 
       - name: Checkov Scan
-        run: checkov -d . --framework terraform --quiet --soft-fail false
+        run: checkov -d . --framework terraform --quiet
 
   plan:
     name: Terraform Plan

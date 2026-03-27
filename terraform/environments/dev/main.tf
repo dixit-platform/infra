@@ -23,3 +23,27 @@ resource "random_id" "suffix" {
 resource "aws_s3_bucket" "demo" {
   bucket = "dev-demo-bucket-${random_id.suffix.hex}"
 }
+
+resource "aws_s3_bucket_public_access_block" "demo" {
+  bucket = aws_s3_bucket.demo.id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_kms_key" "s3" {
+  description = "KMS key for S3 encryption"
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "demo" {
+  bucket = aws_s3_bucket.demo.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      kms_master_key_id = aws_kms_key.s3.arn
+      sse_algorithm     = "aws:kms"
+    }
+  }
+}
