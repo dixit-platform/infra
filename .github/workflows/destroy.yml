@@ -1,0 +1,194 @@
+name: Destroy Infrastructure
+ 
+# ─────────────────────────────────────────────────────────────
+# Manual only — destroys infrastructure deployed to an environment
+# Requires: target environment, the release tag that was deployed,
+#           typing DESTROY to confirm, and a reason for audit trail
+# ─────────────────────────────────────────────────────────────
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment to destroy'
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      tag:
+        description: 'Release tag that was deployed (e.g. dev-v1.0.3, staging-v1.0.3, v1.0.3)'
+        required: true
+      confirm:
+        description: 'Type DESTROY to confirm — this is irreversible'
+        required: true
+      reason:
+        description: 'Reason for destroying (logged for audit trail)'
+        required: true
+ 
+permissions:
+  contents: write
+  id-token: write
+ 
+jobs:
+  # ──────────────────────────────────────────────
+  # 1. Guard — validate all inputs before touching anything
+  # ──────────────────────────────────────────────
+  guard:
+    name: Validate Inputs
+    runs-on: [self-hosted, Linux, X64, terraform]
+    if: github.event.repository.full_name == github.repository
+    outputs:
+      environment: ${{ steps.resolve.outputs.environment }}
+      tf_dir:      ${{ steps.resolve.outputs.tf_dir }}
+      tag:         ${{ steps.resolve.outputs.tag }}
+ 
+    steps:
+      - name: Validate and resolve
+        id: resolve
+        run: |
+          ENVIRONMENT="${{ inputs.environment }}"
+          TAG="${{ inputs.tag }}"
+          CONFIRM="${{ inputs.confirm }}"
+          REASON="${{ inputs.reason }}"
+ 
+          # ── Confirmation check ────────────────────────────────
+          if [[ "$CONFIRM" != "DESTROY" ]]; then
+            echo "❌ You must type DESTROY exactly to confirm."
+            echo "   You typed: '$CONFIRM'"
+            exit 1
+          fi
+ 
+          # ── Reason must not be empty or generic ───────────────
+          if [[ -z "$REASON" || ${#REASON} -lt 10 ]]; then
+            echo "❌ Please provide a meaningful reason (at least 10 characters)."
+            echo "   You typed: '$REASON'"
+            exit 1
+          fi
+ 
+          # ── Tag must match environment ────────────────────────
+          if [[ "$ENVIRONMENT" == "dev" && "$TAG" != dev-v* ]]; then
+            echo "❌ Dev environment expects a dev-v* tag. Got: $TAG"
+            exit 1
+          fi
+ 
+          if [[ "$ENVIRONMENT" == "staging" && "$TAG" != staging-v* ]]; then
+            echo "❌ Staging environment expects a staging-v* tag. Got: $TAG"
+            exit 1
+          fi
+ 
+          if [[ "$ENVIRONMENT" == "prod" && "$TAG" != v* ]]; then
+            echo "❌ Prod environment expects a v* tag (e.g. v1.0.3). Got: $TAG"
+            exit 1
+          fi
+ 
+          # ── Resolve terraform directory ───────────────────────
+          TF_DIR="terraform/environments/${ENVIRONMENT}"
+ 
+          echo "environment=$ENVIRONMENT" >> $GITHUB_OUTPUT
+          echo "tf_dir=$TF_DIR"           >> $GITHUB_OUTPUT
+          echo "tag=$TAG"                 >> $GITHUB_OUTPUT
+ 
+          echo "========================================"
+          echo "  DESTROY PLAN"
+          echo "  Environment : $ENVIRONMENT"
+          echo "  Tag         : $TAG"
+          echo "  TF Dir      : $TF_DIR"
+          echo "  Triggered by: ${{ github.actor }}"
+          echo "  Reason      : $REASON"
+          echo "========================================"
+ 
+  # ──────────────────────────────────────────────
+  # 2. Audit log — record the destroy event before anything runs
+  # ──────────────────────────────────────────────
+  audit-log:
+    name: Audit Log
+    needs: guard
+    runs-on: [self-hosted, Linux, X64, terraform]
+ 
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+ 
+      - name: Write audit entry
+        run: |
+          mkdir -p .github/audit
+          AUDIT_FILE=".github/audit/destroy-log.md"
+ 
+          # Create file with header if it doesn't exist
+          if [ ! -f "$AUDIT_FILE" ]; then
+            echo "# Destroy Audit Log" > $AUDIT_FILE
+            echo "" >> $AUDIT_FILE
+            echo "| Timestamp | Actor | Environment | Tag | Reason | Run |" >> $AUDIT_FILE
+            echo "|-----------|-------|-------------|-----|--------|-----|" >> $AUDIT_FILE
+          fi
+ 
+          # Append new entry
+          echo "| $(date -u '+%Y-%m-%d %H:%M UTC') | ${{ github.actor }} | ${{ needs.guard.outputs.environment }} | ${{ needs.guard.outputs.tag }} | ${{ inputs.reason }} | [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |" >> $AUDIT_FILE
+ 
+          git config user.name  "${{ github.actor }}"
+          git config user.email "${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com"
+          git add .github/audit/destroy-log.md
+          git commit -m "audit: destroy ${{ needs.guard.outputs.tag }} from ${{ needs.guard.outputs.environment }} by ${{ github.actor }}"
+          git push origin HEAD
+ 
+          echo "Audit entry written ✅"
+ 
+  # ──────────────────────────────────────────────
+  # 3. Destroy — checkout the exact tag and destroy
+  # ──────────────────────────────────────────────
+  destroy:
+    name: Destroy ${{ needs.guard.outputs.environment }} (${{ needs.guard.outputs.tag }})
+    needs: [guard, audit-log]
+    runs-on: [self-hosted, Linux, X64, terraform]
+    environment: ${{ needs.guard.outputs.environment }}   # triggers GitHub approval gate
+    env:
+      TF_DIR: ${{ needs.guard.outputs.tf_dir }}
+      AWS_DEFAULT_REGION: ap-south-1
+ 
+    steps:
+      - name: Checkout at tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.guard.outputs.tag }}   # destroy exactly what was deployed
+          fetch-depth: 0
+ 
+      - name: Verify Terraform
+        run: terraform version
+ 
+      - name: Terraform Init
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform init -input=false
+ 
+      - name: Terraform Plan Destroy
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          echo "========================================"
+          echo "  RESOURCES THAT WILL BE DESTROYED"
+          echo "========================================"
+          terraform plan -destroy -input=false
+          echo "Plan complete — review above before apply"
+ 
+      - name: Terraform Destroy
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          echo "========================================"
+          echo "  DESTROYING ${{ needs.guard.outputs.environment }}"
+          echo "  Tag    : ${{ needs.guard.outputs.tag }}"
+          echo "  Reason : ${{ inputs.reason }}"
+          echo "  Actor  : ${{ github.actor }}"
+          echo "========================================"
+          terraform destroy -input=false -auto-approve
+ 
+      - name: Confirm destroy complete
+        run: |
+          echo "========================================"
+          echo "  DESTROY COMPLETE ✅"
+          echo "  Environment : ${{ needs.guard.outputs.environment }}"
+          echo "  Tag         : ${{ needs.guard.outputs.tag }}"
+          echo "  Destroyed by: ${{ github.actor }}"
+          echo "  Reason      : ${{ inputs.reason }}"
+          echo "  Run         : ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          echo "========================================"
