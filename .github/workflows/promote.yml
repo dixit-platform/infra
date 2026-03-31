@@ -70,7 +70,7 @@ jobs:
           # ── Validate confirmation for prod ────────────────────
           if [[ "$ENVIRONMENT" == "prod" ]]; then
             if [[ "${{ inputs.confirm }}" != "CONFIRM" ]]; then
-              echo "❌ Production deployment requires typing CONFIRM."
+              echo " Production deployment requires typing CONFIRM."
               echo "   You typed: '${{ inputs.confirm }}'"
               exit 1
             fi
@@ -81,12 +81,12 @@ jobs:
           # stage-v* → prod only
           # v*       → prod only (main branch release from cd.yml)
           if [[ "$ENVIRONMENT" == "stage" && "$TAG" != dev-v* ]]; then
-            echo "❌ Only dev-v* tags can be promoted to stage. Got: $TAG"
+            echo " Only dev-v* tags can be promoted to stage. Got: $TAG"
             exit 1
           fi
 
           if [[ "$ENVIRONMENT" == "prod" && "$TAG" != stage-v* && "$TAG" != v[0-9]* ]]; then
-            echo "❌ Only stage-v* or v* tags can be promoted to prod. Got: $TAG"
+            echo " Only stage-v* or v* tags can be promoted to prod. Got: $TAG"
             exit 1
           fi
 
@@ -139,7 +139,7 @@ jobs:
         working-directory: ${{ env.TF_DIR }}
         run: |
           terraform plan -input=false -out=tfplan
-          echo "Plan complete ✅"
+          echo "Plan complete"
 
       - name: Terraform Apply
         working-directory: ${{ env.TF_DIR }}
@@ -157,11 +157,11 @@ jobs:
           echo "========================================"
           OUTPUT=$(terraform output 2>&1)
           if echo "$OUTPUT" | grep -q "No outputs found"; then
-            echo "ℹ️  No outputs defined yet — skipping output check"
+            echo " No outputs defined yet — skipping output check"
           else
             echo "$OUTPUT"
           fi
-          echo "Validation complete ✅"
+          echo "Validation complete"
 
   # ──────────────────────────────────────────────
   # 3. Tag — create promotion tag after successful deploy
@@ -197,7 +197,7 @@ jobs:
           elif [[ "$SOURCE_TAG" == v* ]]; then
             # Already a prod v* tag from main — no new tag needed
             echo "tag=" >> $GITHUB_OUTPUT
-            echo "ℹ️  Source is already a prod tag — no new tag will be created"
+            echo " Source is already a prod tag — no new tag will be created"
             exit 0
           else
             NEW_TAG="v${VERSION}"
