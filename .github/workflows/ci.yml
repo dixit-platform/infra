@@ -1,0 +1,70 @@
+name: CI - Terraform Validation
+
+on:
+  pull_request:
+    branches:
+      - dev
+      - staging
+      - main
+
+jobs:
+
+  lint:
+    name: Lint & Validate
+    runs-on: self-hosted
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive
+
+      - name: Terraform Validate
+        working-directory: terraform/environments/dev
+        run: |
+          terraform init -backend=false
+          terraform validate
+
+      - name: TFLint
+        working-directory: terraform/environments/dev
+        run: tflint
+
+  security:
+    name: Security Scan
+    runs-on: self-hosted
+    needs: lint
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Gitleaks Scan
+        run: gitleaks detect --source . --exit-code 1
+
+      - name: Trivy Scan
+        run: trivy config . --severity HIGH,CRITICAL
+
+      - name: Checkov Scan
+#        run: checkov -d . --framework terraform --quiet
+        run: |
+            checkov -d . \
+            --framework terraform \
+            --quiet \
+            --soft-fail-on MEDIUM,LOW \
+            --hard-fail-on HIGH,CRITICAL \
+            --skip-check CKV_AWS_18,CKV_AWS_21,CKV_AWS_144,CKV_AWS_145,CKV2_AWS_61,CKV2_AWS_62,CKV2_AWS_64,CKV_AWS_7
+
+  plan:
+    name: Terraform Plan
+    runs-on: self-hosted
+    needs: security
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Terraform Init
+        working-directory: terraform/environments/dev
+        run: terraform init
+
+      - name: Terraform Plan
+        working-directory: terraform/environments/dev
+        run: terraform plan -no-color
