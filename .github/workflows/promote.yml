@@ -1,0 +1,210 @@
+name: Promote
+
+# ─────────────────────────────────────────────────────────────
+# TRIGGER 1: Automatic — dev-v* tag created by cd.yml
+#            → promotes to stage automatically
+#
+# TRIGGER 2: Manual — workflow_dispatch
+#            → promotes stage-v* to prod (human approval required)
+# ─────────────────────────────────────────────────────────────
+on:
+  push:
+    tags:
+      - 'dev-v*'             # auto-promote dev release to stage
+
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to deploy (e.g. stage-v1.0.3)'
+        required: true
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'prod'
+        type: choice
+        options:
+          - stage
+          - prod
+      confirm:
+        description: 'Type CONFIRM to proceed (required for prod)'
+        required: true
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  # ──────────────────────────────────────────────
+  # 1. Guard — validate inputs and resolve context
+  # ──────────────────────────────────────────────
+  guard:
+    name: Validate & Resolve
+    runs-on: [self-hosted, Linux, X64, terraform]
+    if: github.event.repository.full_name == github.repository
+    outputs:
+      tag:         ${{ steps.resolve.outputs.tag }}
+      environment: ${{ steps.resolve.outputs.environment }}
+      tf_dir:      ${{ steps.resolve.outputs.tf_dir }}
+
+    steps:
+      - name: Resolve tag and environment
+        id: resolve
+        run: |
+          # ── Determine tag and target environment ──────────────
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            # Automatic path: dev-v* tag was pushed by cd.yml
+            TAG="${{ github.ref_name }}"
+            ENVIRONMENT="stage"
+          else
+            # Manual path: workflow_dispatch
+            TAG="${{ inputs.tag }}"
+            ENVIRONMENT="${{ inputs.environment }}"
+          fi
+
+          # ── Validate confirmation for prod ────────────────────
+          if [[ "$ENVIRONMENT" == "prod" ]]; then
+            if [[ "${{ inputs.confirm }}" != "CONFIRM" ]]; then
+              echo "❌ Production deployment requires typing CONFIRM in the confirm input."
+              echo "   You typed: '${{ inputs.confirm }}'"
+              exit 1
+            fi
+          fi
+
+          # ── Validate tag matches target environment ───────────
+          # dev-v*      → can only promote to stage
+          # stage-v*  → can only promote to prod
+          # v*          → already a prod tag, reject
+          if [[ "$ENVIRONMENT" == "stage" && "$TAG" != dev-v* ]]; then
+            echo "❌ Only dev-v* tags can be promoted to stage. Got: $TAG"
+            exit 1
+          fi
+
+          if [[ "$ENVIRONMENT" == "prod" && "$TAG" != stage-v* ]]; then
+            echo "❌ Only stage-v* tags can be promoted to prod. Got: $TAG"
+            exit 1
+          fi
+
+          # ── Resolve terraform directory ───────────────────────
+          if [[ "$ENVIRONMENT" == "prod" ]]; then
+            TF_DIR="terraform/environments/prod"
+          else
+            TF_DIR="terraform/environments/stage"
+          fi
+
+          echo "tag=$TAG"               >> $GITHUB_OUTPUT
+          echo "environment=$ENVIRONMENT" >> $GITHUB_OUTPUT
+          echo "tf_dir=$TF_DIR"         >> $GITHUB_OUTPUT
+
+          echo "========================================"
+          echo "  PROMOTION PLAN"
+          echo "  Tag         : $TAG"
+          echo "  Environment : $ENVIRONMENT"
+          echo "  TF Dir      : $TF_DIR"
+          echo "  Triggered by: ${{ github.actor }}"
+          echo "========================================"
+
+  # ──────────────────────────────────────────────
+  # 2. Deploy — checkout tag, apply, validate
+  # ──────────────────────────────────────────────
+  deploy:
+    name: Deploy ${{ needs.guard.outputs.tag }} → ${{ needs.guard.outputs.environment }}
+    needs: guard
+    runs-on: [self-hosted, Linux, X64, terraform]
+    environment: ${{ needs.guard.outputs.environment }}   # triggers GitHub approval gate
+    env:
+      TF_DIR: ${{ needs.guard.outputs.tf_dir }}
+      AWS_DEFAULT_REGION: ap-south-1
+
+    steps:
+      - name: Checkout at tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.guard.outputs.tag }}   # deploy exactly this tag, not HEAD
+          fetch-depth: 0
+
+      - name: Verify Terraform
+        run: terraform version
+
+      - name: Terraform Init
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform init -input=false
+
+      - name: Terraform Plan
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform plan -input=false -out=tfplan
+          echo "Plan complete ✅"
+
+      - name: Terraform Apply
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          echo "========================================"
+          echo "  DEPLOYING TO ${{ needs.guard.outputs.environment }}"
+          echo "========================================"
+          terraform apply -input=false -auto-approve tfplan
+
+      - name: Validate Infrastructure
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          echo "========================================"
+          echo "  INFRASTRUCTURE VALIDATION"
+          echo "========================================"
+          OUTPUT=$(terraform output 2>&1)
+          if echo "$OUTPUT" | grep -q "No outputs found"; then
+            echo "ℹ️  No outputs defined yet — skipping output check"
+          else
+            echo "$OUTPUT"
+          fi
+          echo "Validation complete ✅"
+
+  # ──────────────────────────────────────────────
+  # 3. Tag — create promotion tag after successful deploy
+  #    dev-v1.0.3  → stage-v1.0.3
+  #    stage-v1.0.3 → v1.0.3  (prod release)
+  # ──────────────────────────────────────────────
+  tag-release:
+    name: Tag Release
+    needs: [guard, deploy]
+    runs-on: [self-hosted, Linux, X64, terraform]
+    if: success() && github.event.repository.full_name == github.repository
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate promotion tag
+        id: version
+        run: |
+          SOURCE_TAG="${{ needs.guard.outputs.tag }}"
+          ENVIRONMENT="${{ needs.guard.outputs.environment }}"
+
+          # Strip source prefix to get bare version number
+          # dev-v1.0.3    → 1.0.3
+          # stage-v1.0.3 → 1.0.3
+          VERSION="${SOURCE_TAG#dev-v}"
+          VERSION="${VERSION#stage-v}"
+
+          if [[ "$ENVIRONMENT" == "stage" ]]; then
+            NEW_TAG="stage-v${VERSION}"
+          else
+            NEW_TAG="v${VERSION}"    # clean prod tag: v1.0.3
+          fi
+
+          echo "tag=$NEW_TAG" >> $GITHUB_OUTPUT
+          echo "Promotion tag: $SOURCE_TAG → $NEW_TAG"
+
+      - name: Create and push promotion tag
+        run: |
+          git config user.name  "${{ github.actor }}"
+          git config user.email "${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com"
+          git tag ${{ steps.version.outputs.tag }}
+          git push origin ${{ steps.version.outputs.tag }}
+          echo "========================================"
+          echo "  PROMOTION COMPLETE"
+          echo "  Source tag  : ${{ needs.guard.outputs.tag }}"
+          echo "  New tag     : ${{ steps.version.outputs.tag }}"
+          echo "  Environment : ${{ needs.guard.outputs.environment }}"
+          echo "  Deployed by : ${{ github.actor }}"
+          echo "========================================"
