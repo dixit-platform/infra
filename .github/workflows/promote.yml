@@ -2,20 +2,20 @@ name: Promote
 
 # ─────────────────────────────────────────────────────────────
 # TRIGGER 1: Automatic — dev-v* tag created by cd.yml
-#            → promotes to staging automatically
+#            → promotes to stage automatically
 #
 # TRIGGER 2: Manual — workflow_dispatch
-#            → promotes staging-v* to prod (human approval required)
+#            → promotes stage-v* to prod (human approval required)
 # ─────────────────────────────────────────────────────────────
 on:
   push:
     tags:
-      - 'dev-v*'             # auto-promote dev release to staging
+      - 'dev-v*'             # auto-promote dev release to stage
 
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to deploy (e.g. staging-v1.0.3)'
+        description: 'Tag to deploy (e.g. stage-v1.0.3)'
         required: true
       environment:
         description: 'Target environment'
@@ -23,7 +23,7 @@ on:
         default: 'prod'
         type: choice
         options:
-          - staging
+          - stage
           - prod
       confirm:
         description: 'Type CONFIRM to proceed (required for prod)'
@@ -54,7 +54,7 @@ jobs:
           if [[ "${{ github.event_name }}" == "push" ]]; then
             # Automatic path: dev-v* tag was pushed by cd.yml
             TAG="${{ github.ref_name }}"
-            ENVIRONMENT="staging"
+            ENVIRONMENT="stage"
           else
             # Manual path: workflow_dispatch
             TAG="${{ inputs.tag }}"
@@ -71,16 +71,16 @@ jobs:
           fi
 
           # ── Validate tag matches target environment ───────────
-          # dev-v*      → can only promote to staging
-          # staging-v*  → can only promote to prod
+          # dev-v*      → can only promote to stage
+          # stage-v*  → can only promote to prod
           # v*          → already a prod tag, reject
-          if [[ "$ENVIRONMENT" == "staging" && "$TAG" != dev-v* ]]; then
-            echo "❌ Only dev-v* tags can be promoted to staging. Got: $TAG"
+          if [[ "$ENVIRONMENT" == "stage" && "$TAG" != dev-v* ]]; then
+            echo "❌ Only dev-v* tags can be promoted to stage. Got: $TAG"
             exit 1
           fi
 
-          if [[ "$ENVIRONMENT" == "prod" && "$TAG" != staging-v* ]]; then
-            echo "❌ Only staging-v* tags can be promoted to prod. Got: $TAG"
+          if [[ "$ENVIRONMENT" == "prod" && "$TAG" != stage-v* ]]; then
+            echo "❌ Only stage-v* tags can be promoted to prod. Got: $TAG"
             exit 1
           fi
 
@@ -88,7 +88,7 @@ jobs:
           if [[ "$ENVIRONMENT" == "prod" ]]; then
             TF_DIR="terraform/environments/prod"
           else
-            TF_DIR="terraform/environments/staging"
+            TF_DIR="terraform/environments/stage"
           fi
 
           echo "tag=$TAG"               >> $GITHUB_OUTPUT
@@ -159,8 +159,8 @@ jobs:
 
   # ──────────────────────────────────────────────
   # 3. Tag — create promotion tag after successful deploy
-  #    dev-v1.0.3  → staging-v1.0.3
-  #    staging-v1.0.3 → v1.0.3  (prod release)
+  #    dev-v1.0.3  → stage-v1.0.3
+  #    stage-v1.0.3 → v1.0.3  (prod release)
   # ──────────────────────────────────────────────
   tag-release:
     name: Tag Release
@@ -182,12 +182,12 @@ jobs:
 
           # Strip source prefix to get bare version number
           # dev-v1.0.3    → 1.0.3
-          # staging-v1.0.3 → 1.0.3
+          # stage-v1.0.3 → 1.0.3
           VERSION="${SOURCE_TAG#dev-v}"
-          VERSION="${VERSION#staging-v}"
+          VERSION="${VERSION#stage-v}"
 
-          if [[ "$ENVIRONMENT" == "staging" ]]; then
-            NEW_TAG="staging-v${VERSION}"
+          if [[ "$ENVIRONMENT" == "stage" ]]; then
+            NEW_TAG="stage-v${VERSION}"
           else
             NEW_TAG="v${VERSION}"    # clean prod tag: v1.0.3
           fi

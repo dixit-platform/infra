@@ -14,10 +14,10 @@ on:
         type: choice
         options:
           - dev
-          - staging
+          - stage
           - prod
       tag:
-        description: 'Release tag that was deployed (e.g. dev-v1.0.3, staging-v1.0.3, v1.0.3)'
+        description: 'Release tag that was deployed (e.g. dev-v1.0.3, stage-v1.0.3, v1.0.3)'
         required: true
       confirm:
         description: 'Type DESTROY to confirm — this is irreversible'
@@ -72,8 +72,8 @@ jobs:
             exit 1
           fi
  
-          if [[ "$ENVIRONMENT" == "staging" && "$TAG" != staging-v* ]]; then
-            echo "❌ Staging environment expects a staging-v* tag. Got: $TAG"
+          if [[ "$ENVIRONMENT" == "stage" && "$TAG" != stage-v* ]]; then
+            echo "❌ stage environment expects a stage-v* tag. Got: $TAG"
             exit 1
           fi
  
