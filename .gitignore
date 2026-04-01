@@ -1,6 +1,5 @@
 # Terraform local files
 .terraform/
-.terraform.lock.hcl
 *.tfstate
 *.tfstate.backup
 *.tfplan
@@ -11,8 +10,7 @@ tfplan-*.json
 crash.log
 crash.*.log
 
-# Sensitive variable files — never commit these
-*.tfvars
+# Sensitive variable files -- never commit these
 *.tfvars.json
 !example.tfvars
 
