@@ -16,9 +16,6 @@ on:
           - dev
           - stage
           - prod
-      tag:
-        description: 'Release tag that was deployed (e.g. dev-v1.0.3, stage-v1.0.3, v1.0.3)'
-        required: true
       confirm:
         description: 'Type DESTROY to confirm — this is irreversible'
         required: true
@@ -48,7 +45,7 @@ jobs:
         id: resolve
         run: |
           ENVIRONMENT="${{ inputs.environment }}"
-          TAG="${{ inputs.tag }}"
+          TAG="${{ github.ref_name }}"
           CONFIRM="${{ inputs.confirm }}"
           REASON="${{ inputs.reason }}"
  
@@ -73,11 +70,11 @@ jobs:
           fi
  
           if [[ "$ENVIRONMENT" == "stage" && "$TAG" != stage-v* ]]; then
-            echo "❌ stage environment expects a stage-v* tag. Got: $TAG"
+            echo "❌ Stage environment expects a stage-v* tag. Got: $TAG"
             exit 1
           fi
  
-          if [[ "$ENVIRONMENT" == "prod" && "$TAG" != v* ]]; then
+          if [[ "$ENVIRONMENT" == "prod" && "$TAG" != v[0-9]* ]]; then
             echo "❌ Prod environment expects a v* tag (e.g. v1.0.3). Got: $TAG"
             exit 1
           fi
@@ -100,6 +97,9 @@ jobs:
  
   # ──────────────────────────────────────────────
   # 2. Audit log — record the destroy event before anything runs
+  #    Checks out main branch explicitly to avoid detached HEAD
+  #    (runner checks out tags which puts git in detached HEAD state —
+  #     git push origin HEAD fails in that state)
   # ──────────────────────────────────────────────
   audit-log:
     name: Audit Log
@@ -107,10 +107,11 @@ jobs:
     runs-on: [self-hosted, Linux, X64, terraform]
  
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Checkout main branch
+        uses: actions/checkout@v5
         with:
-          fetch-depth: 0
+          ref: main           # always checkout main for audit log
+          fetch-depth: 0      # full history needed for git push
  
       - name: Write audit entry
         run: |
@@ -132,9 +133,12 @@ jobs:
           git config user.email "${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com"
           git add .github/audit/destroy-log.md
           git commit -m "audit: destroy ${{ needs.guard.outputs.tag }} from ${{ needs.guard.outputs.environment }} by ${{ github.actor }}"
-          git push origin HEAD
+          git push origin main  # push to explicit branch — never HEAD
  
-          echo "Audit entry written ✅"
+          echo "========================================"
+          echo "  AUDIT ENTRY WRITTEN ✅"
+          echo "  File: .github/audit/destroy-log.md"
+          echo "========================================"
  
   # ──────────────────────────────────────────────
   # 3. Destroy — checkout the exact tag and destroy
@@ -150,7 +154,7 @@ jobs:
  
     steps:
       - name: Checkout at tag
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ needs.guard.outputs.tag }}   # destroy exactly what was deployed
           fetch-depth: 0
