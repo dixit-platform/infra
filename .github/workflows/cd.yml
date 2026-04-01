@@ -4,7 +4,7 @@ on:
   push:
     branches:
       - dev
-      - staging
+      - stage
       - main
 
 permissions:
@@ -28,34 +28,34 @@ jobs:
         id: resolve
         run: |
           if [[ "${{ github.ref_name }}" == "main" ]]; then
-            echo "environment=prod"    >> $GITHUB_OUTPUT
-            echo "tag_prefix=v"       >> $GITHUB_OUTPUT
-            echo "tf_dir=terraform/environments/prod" >> $GITHUB_OUTPUT
-          elif [[ "${{ github.ref_name }}" == "staging" ]]; then
-            echo "environment=staging"        >> $GITHUB_OUTPUT
-            echo "tag_prefix=staging-v"      >> $GITHUB_OUTPUT
-            echo "tf_dir=terraform/environments/staging" >> $GITHUB_OUTPUT
+            echo "environment=prod"                          >> $GITHUB_OUTPUT
+            echo "tag_prefix=v"                             >> $GITHUB_OUTPUT
+            echo "tf_dir=terraform/environments/prod"       >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref_name }}" == "stage" ]]; then
+            echo "environment=stage"                        >> $GITHUB_OUTPUT
+            echo "tag_prefix=stage-v"                       >> $GITHUB_OUTPUT
+            echo "tf_dir=terraform/environments/stage"      >> $GITHUB_OUTPUT
           else
-            echo "environment=dev"        >> $GITHUB_OUTPUT
-            echo "tag_prefix=dev-v"      >> $GITHUB_OUTPUT
-            echo "tf_dir=terraform/environments/dev" >> $GITHUB_OUTPUT
+            echo "environment=dev"                          >> $GITHUB_OUTPUT
+            echo "tag_prefix=dev-v"                         >> $GITHUB_OUTPUT
+            echo "tf_dir=terraform/environments/dev"        >> $GITHUB_OUTPUT
           fi
 
   # ──────────────────────────────────────────────
-  # 2. Ephemeral deploy: apply → validate → destroy
+  # 2. Ephemeral deploy: plan → apply → validate → destroy
   # ──────────────────────────────────────────────
   deploy:
     name: Ephemeral Deploy (${{ needs.set-env.outputs.environment }})
     needs: set-env
     runs-on: [self-hosted, Linux, X64, terraform]
-    environment: ${{ needs.set-env.outputs.environment }}   # triggers approval gate for staging/prod
+    environment: ${{ needs.set-env.outputs.environment }}   # triggers approval gate for stage/prod
     env:
       TF_DIR: ${{ needs.set-env.outputs.tf_dir }}
       AWS_DEFAULT_REGION: ap-south-1
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5         # v5 — Node.js 24, no deprecation warning
 
       - name: Verify Terraform
         run: terraform version
@@ -63,30 +63,26 @@ jobs:
       # ── Init ──────────────────────────────────
       - name: Terraform Init
         working-directory: ${{ env.TF_DIR }}
-        run: |
-          terraform init -input=false
+        run: terraform init -input=false
 
-      # ── Download plan artifact from CI ────────
-      # The CI pipeline uploads tfplan as an artifact.
-      # We download and apply EXACTLY that plan — no surprises.
-      - name: Download plan artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: tfplan-${{ needs.set-env.outputs.environment }}
-          path: ${{ env.TF_DIR }}
-        continue-on-error: true   # first run may not have a CI artifact yet
+      # ── Plan ──────────────────────────────────
+      # Always run a fresh plan — no artifact download needed.
+      # CD runs on merge (not PR), so no CI artifact exists at this point.
+      # Fresh plan is also safer — always reflects current state.
+      - name: Terraform Plan
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform plan -input=false -out=tfplan
+          echo "Plan complete ✅"
 
       # ── Apply ─────────────────────────────────
       - name: Terraform Apply
         working-directory: ${{ env.TF_DIR }}
         run: |
-          if [ -f tfplan ]; then
-            echo "Applying saved plan artifact..."
-            terraform apply -input=false -auto-approve tfplan
-          else
-            echo "No plan artifact found — running fresh apply..."
-            terraform apply -input=false -auto-approve
-          fi
+          echo "========================================"
+          echo "  APPLYING — ${{ needs.set-env.outputs.environment }}"
+          echo "========================================"
+          terraform apply -input=false -auto-approve tfplan
 
       # ── Validate infra (smoke test) ───────────
       - name: Validate Infrastructure
@@ -95,8 +91,13 @@ jobs:
           echo "========================================"
           echo "  INFRASTRUCTURE VALIDATION"
           echo "========================================"
-          terraform output
-          echo "All outputs retrieved successfully ✅"
+          OUTPUT=$(terraform output 2>&1)
+          if echo "$OUTPUT" | grep -q "No outputs found"; then
+            echo "ℹ️  No outputs defined yet — skipping output check"
+          else
+            echo "$OUTPUT"
+          fi
+          echo "Validation complete ✅"
 
       # ── Destroy (ephemeral — zero long-term cost) ──
       - name: Terraform Destroy
@@ -119,7 +120,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5         # v5 — Node.js 24
         with:
           fetch-depth: 0   # needed to read existing tags
 
@@ -134,7 +135,6 @@ jobs:
           if [ -z "$LATEST" ]; then
             NEXT="${PREFIX}1.0.0"
           else
-            # Strip prefix, split semver
             VERSION="${LATEST#$PREFIX}"
             MAJOR=$(echo $VERSION | cut -d. -f1)
             MINOR=$(echo $VERSION | cut -d. -f2)
@@ -158,8 +158,8 @@ jobs:
 
       - name: Print release summary
         run: |
-          echo "  CD Pipeline complete"
-          echo "  Environment : ${{ needs.set-env.outputs.environment }}"
-          echo "  Release tag : ${{ steps.version.outputs.tag }}"
-          echo "  Commit      : ${{ github.sha }}"
-          echo "  Triggered by: ${{ github.actor }}"
+          echo "✅ CD Pipeline complete"
+          echo "   Environment : ${{ needs.set-env.outputs.environment }}"
+          echo "   Release tag : ${{ steps.version.outputs.tag }}"
+          echo "   Commit      : ${{ github.sha }}"
+          echo "   Triggered by: ${{ github.actor }}"
