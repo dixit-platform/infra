@@ -27,6 +27,21 @@ resource "aws_vpc" "this" {
 }
 
 # ─────────────────────────────────────────────
+# VPC SG
+# ─────────────────────────────────────────────
+
+resource "aws_default_security_group" "this" {
+  vpc_id = aws_vpc.this.id
+
+  ingress = []
+  egress  = []
+
+  tags = merge(local.common_tags, {
+    Name = "${var.project}-${var.environment}-default-sg"
+  })
+}
+
+# ─────────────────────────────────────────────
 # Internet Gateway
 # ─────────────────────────────────────────────
 resource "aws_internet_gateway" "this" {
@@ -46,7 +61,7 @@ resource "aws_subnet" "public" {
   vpc_id                  = aws_vpc.this.id
   cidr_block              = each.value
   availability_zone       = each.key
-  map_public_ip_on_launch = true
+  map_public_ip_on_launch = false
 
   tags = merge(local.common_tags, {
     Name = "${var.project}-${var.environment}-public-${each.key}"
