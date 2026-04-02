@@ -1,0 +1,103 @@
+name: CI - Terraform Validation
+
+on:
+  push:
+    branches:
+      - '**'
+      - '!dev'
+      - '!stage'
+      - '!main'
+  pull_request:
+    branches:
+      - dev
+      - stage
+      - main
+
+concurrency:
+  group: ci-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint & Validate
+    runs-on: [self-hosted, Linux, X64, terraform]
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive terraform
+
+      - name: Terraform Validate
+        run: |
+          for dir in terraform/environments/dev terraform/environments/stage terraform/environments/prod; do
+            echo "Validating $dir"
+            terraform -chdir=$dir init -backend=false -input=false
+            terraform -chdir=$dir validate
+          done
+
+      - name: TFLint
+        run: |
+          for dir in terraform/environments/dev terraform/environments/stage terraform/environments/prod; do
+            echo "TFLint $dir"
+            tflint --chdir=$dir
+          done
+
+  security:
+    name: Security Scan
+    runs-on: [self-hosted, Linux, X64, terraform]
+    needs: lint
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Gitleaks Scan
+        run: gitleaks detect --source . --exit-code 1
+
+      - name: Trivy Scan
+        run: trivy config . --severity HIGH,CRITICAL
+
+      - name: Checkov Scan
+        run: |
+          checkov -d . \
+            --framework terraform \
+            --quiet \
+            --soft-fail-on MEDIUM,LOW \
+            --hard-fail-on HIGH,CRITICAL \
+            --skip-check CKV_AWS_18,CKV_AWS_21,CKV_AWS_144,CKV_AWS_145,CKV2_AWS_61,CKV2_AWS_62,CKV2_AWS_64,CKV_AWS_7,CKV_AWS_158,CKV_AWS_338,CKV_AWS_290,CKV_AWS_355
+
+  plan:
+    name: Terraform Plan (${{ matrix.environment }})
+    runs-on: [self-hosted, Linux, X64, terraform]
+    needs: security
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - environment: dev
+            tf_dir: terraform/environments/dev
+          - environment: stage
+            tf_dir: terraform/environments/stage
+          - environment: prod
+            tf_dir: terraform/environments/prod
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Terraform Init
+        working-directory: ${{ matrix.tf_dir }}
+        run: terraform init -input=false
+
+      - name: Terraform Plan
+        working-directory: ${{ matrix.tf_dir }}
+        run: terraform plan -no-color -input=false

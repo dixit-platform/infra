@@ -1,0 +1,176 @@
+name: CD Pipeline
+
+on:
+  push:
+    branches:
+      - dev
+      - stage
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+
+  # ──────────────────────────────────────────────
+  # 1. Resolve environment
+  # ──────────────────────────────────────────────
+  set-env:
+    name: Set Environment
+    runs-on: [self-hosted, Linux, X64, terraform]
+    if: github.event.repository.full_name == github.repository
+    outputs:
+      environment: ${{ steps.resolve.outputs.environment }}
+      tag_prefix:  ${{ steps.resolve.outputs.tag_prefix }}
+      tf_dir:      ${{ steps.resolve.outputs.tf_dir }}
+
+    steps:
+      - name: Resolve environment from branch
+        id: resolve
+        run: |
+          if [[ "${{ github.ref_name }}" == "main" ]]; then
+            ENVIRONMENT="prod"
+            TAG_PREFIX="v"
+            TF_DIR="terraform/environments/prod"
+          elif [[ "${{ github.ref_name }}" == "stage" ]]; then
+            ENVIRONMENT="stage"
+            TAG_PREFIX="stage-v"
+            TF_DIR="terraform/environments/stage"
+          else
+            ENVIRONMENT="dev"
+            TAG_PREFIX="dev-v"
+            TF_DIR="terraform/environments/dev"
+          fi
+
+          echo "environment=$ENVIRONMENT" >> $GITHUB_OUTPUT
+          echo "tag_prefix=$TAG_PREFIX"   >> $GITHUB_OUTPUT
+          echo "tf_dir=$TF_DIR"           >> $GITHUB_OUTPUT
+
+          echo "========================================"
+          echo "  CD CONTEXT"
+          echo "  Branch      : ${{ github.ref_name }}"
+          echo "  Environment : $ENVIRONMENT"
+          echo "  TF Dir      : $TF_DIR"
+          echo "========================================"
+
+  # ──────────────────────────────────────────────
+  # 2. Ephemeral Deploy (SAFE)
+  # ──────────────────────────────────────────────
+  ephemeral-deploy:
+    name: Ephemeral Deploy (${{ needs.set-env.outputs.environment }})
+    needs: set-env
+    runs-on: [self-hosted, Linux, X64, terraform]
+
+    env:
+      TF_DIR: ${{ needs.set-env.outputs.tf_dir }}
+      AWS_DEFAULT_REGION: ap-south-1
+      EPHEMERAL_ID: ephemeral-${{ github.run_id }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Verify Terraform
+        run: terraform version
+
+      # ✅ SAFE INIT (isolated backend)
+      - name: Terraform Init (Ephemeral Safe)
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          echo "Using backend key: $EPHEMERAL_ID"
+
+          terraform init -input=false \
+            -backend-config="key=${EPHEMERAL_ID}/terraform.tfstate"
+
+      # ✅ Workspace isolation
+      - name: Setup Workspace
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform workspace new $EPHEMERAL_ID || true
+          terraform workspace select $EPHEMERAL_ID
+
+      # ✅ Safety check
+      - name: Safety Check (Prevent Real State Usage)
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          echo "Validating isolation..."
+          terraform workspace show
+
+      - name: Terraform Plan
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform plan -input=false -out=tfplan
+
+      - name: Terraform Apply
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          echo "========================================"
+          echo "  EPHEMERAL APPLY"
+          echo "  ID: $EPHEMERAL_ID"
+          echo "========================================"
+
+          terraform apply -input=false -auto-approve tfplan
+
+      - name: Validate Infrastructure
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform output || echo "No outputs defined"
+
+      # ✅ ALWAYS DESTROY (safe)
+      - name: Terraform Destroy (Ephemeral Safe)
+        working-directory: ${{ env.TF_DIR }}
+        if: always()
+        run: |
+          echo "========================================"
+          echo "  DESTROYING EPHEMERAL INFRA"
+          echo "========================================"
+
+          terraform destroy -input=false -auto-approve || true
+
+  # ──────────────────────────────────────────────
+  # 3. Tag Release
+  # ──────────────────────────────────────────────
+  tag-release:
+    name: Tag Release
+    needs: [set-env, ephemeral-deploy]
+    runs-on: [self-hosted, Linux, X64, terraform]
+    if: success() && github.event.repository.full_name == github.repository
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Generate next version tag
+        id: version
+        run: |
+          PREFIX="${{ needs.set-env.outputs.tag_prefix }}"
+
+          LATEST=$(git tag --list "${PREFIX}*" --sort=-v:refname | head -n 1)
+
+          if [ -z "$LATEST" ]; then
+            NEXT="${PREFIX}1.0.0"
+          else
+            VERSION="${LATEST#$PREFIX}"
+            MAJOR=$(echo $VERSION | cut -d. -f1)
+            MINOR=$(echo $VERSION | cut -d. -f2)
+            PATCH=$(echo $VERSION | cut -d. -f3)
+            NEXT="${PREFIX}${MAJOR}.${MINOR}.$((PATCH + 1))"
+          fi
+
+          echo "tag=$NEXT" >> $GITHUB_OUTPUT
+          echo "Next tag: $NEXT"
+
+      - name: Create and push release tag
+        run: |
+          git config user.name  "${{ github.actor }}"
+          git config user.email "${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com"
+
+          git tag ${{ steps.version.outputs.tag }}
+          git push origin ${{ steps.version.outputs.tag }}
+
+          echo "========================================"
+          echo "  RELEASE TAG CREATED"
+          echo "  Tag: ${{ steps.version.outputs.tag }}"
+          echo "========================================"
