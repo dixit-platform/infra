@@ -1,0 +1,176 @@
+name: Deploy
+
+# ─────────────────────────────────────────────────────────────
+# ROLE IN THE PIPELINE:
+#   Manual deploys only. Used for:
+#   - Re-deploying dev with a specific tag
+#   - Promoting stage-v* to stage
+#   - Promoting v* to prod
+#
+# HOW TO USE:
+#   1. Click "Run workflow"
+#   2. Under "Use workflow from" → select the TAG you want to deploy
+#        e.g. dev-v1.0.3 / stage-v1.0.3 / v1.0.3
+#   3. Select target environment
+#   4. Type CONFIRM (required for stage and prod)
+#   No need to type the tag again — github.ref_name is the tag you selected.
+#
+# TAG RULES:
+#   dev-v*   → can only deploy to dev
+#   stage-v* → can only deploy to stage
+#   v*       → can only deploy to prod
+#
+# NOTE:
+#   dev auto-deployment on new tags is handled by auto-deploy.yml.
+#   This workflow is the manual override for all environments.
+# ─────────────────────────────────────────────────────────────
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options:
+          - dev
+          - stage
+          - prod
+      confirm:
+        description: 'Type CONFIRM to proceed (required for stage and prod)'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ──────────────────────────────────────────────
+  # 1. Guard — validate inputs before anything runs
+  # ──────────────────────────────────────────────
+  guard:
+    name: Validate & Resolve
+    runs-on: [self-hosted, Linux, X64, terraform]
+    if: github.event.repository.full_name == github.repository
+    outputs:
+      tag:         ${{ steps.resolve.outputs.tag }}
+      environment: ${{ steps.resolve.outputs.environment }}
+      tf_dir:      ${{ steps.resolve.outputs.tf_dir }}
+
+    steps:
+      - name: Validate inputs and resolve context
+        id: resolve
+        run: |
+          TAG="${{ github.ref_name }}"   # tag selected under "Use workflow from"
+          ENVIRONMENT="${{ inputs.environment }}"
+
+          # ── Confirmation required for stage and prod ──────────
+          if [[ "$ENVIRONMENT" == "stage" || "$ENVIRONMENT" == "prod" ]]; then
+            if [[ "${{ inputs.confirm }}" != "CONFIRM" ]]; then
+              echo "Deployment to $ENVIRONMENT requires typing CONFIRM."
+              echo "You typed: '${{ inputs.confirm }}'"
+              exit 1
+            fi
+          fi
+
+          # ── Tag must match target environment ─────────────────
+          # dev-v*   → dev only
+          # stage-v* → stage only
+          # v*       → prod only
+          if [[ "$ENVIRONMENT" == "dev" && "$TAG" != dev-v* ]]; then
+            echo "Only dev-v* tags can be deployed to dev. Got: $TAG"
+            exit 1
+          fi
+
+          if [[ "$ENVIRONMENT" == "stage" && "$TAG" != stage-v* ]]; then
+            echo "Only stage-v* tags can be deployed to stage. Got: $TAG"
+            exit 1
+          fi
+
+          if [[ "$ENVIRONMENT" == "prod" && "$TAG" != v[0-9]* ]]; then
+            echo "Only v* tags can be deployed to prod. Got: $TAG"
+            exit 1
+          fi
+
+          # ── Resolve TF directory ──────────────────────────────
+          if [[ "$ENVIRONMENT" == "prod" ]]; then
+            TF_DIR="terraform/environments/prod"
+          elif [[ "$ENVIRONMENT" == "stage" ]]; then
+            TF_DIR="terraform/environments/stage"
+          else
+            TF_DIR="terraform/environments/dev"
+          fi
+
+          echo "tag=$TAG"                 >> $GITHUB_OUTPUT
+          echo "environment=$ENVIRONMENT" >> $GITHUB_OUTPUT
+          echo "tf_dir=$TF_DIR"           >> $GITHUB_OUTPUT
+
+          echo "========================================"
+          echo "  DEPLOY PLAN"
+          echo "  Tag         : $TAG"
+          echo "  Environment : $ENVIRONMENT"
+          echo "  TF Dir      : $TF_DIR"
+          echo "  Triggered by: ${{ github.actor }}"
+          echo "========================================"
+
+  # ──────────────────────────────────────────────
+  # 2. Deploy — checkout exact tag, persistent apply
+  #
+  #    environment: field triggers GitHub approval gate
+  #    for stage and prod automatically.
+  # ──────────────────────────────────────────────
+  deploy:
+    name: Deploy ${{ needs.guard.outputs.tag }} → ${{ needs.guard.outputs.environment }}
+    needs: guard
+    runs-on: [self-hosted, Linux, X64, terraform]
+    environment: ${{ needs.guard.outputs.environment }}   # approval gate for stage/prod
+    env:
+      TF_DIR: ${{ needs.guard.outputs.tf_dir }}
+      AWS_DEFAULT_REGION: ap-south-1
+
+    steps:
+      - name: Checkout at tag
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.guard.outputs.tag }}   # always deploy exact tag, never HEAD
+          fetch-depth: 0
+
+      - name: Verify Terraform
+        run: terraform version
+
+      - name: Terraform Init
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform init -input=false
+
+      - name: Terraform Plan
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform plan -input=false -out=tfplan
+          echo "Plan complete"
+
+      - name: Terraform Apply
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          echo "========================================"
+          echo "  DEPLOYING TO ${{ needs.guard.outputs.environment }}"
+          echo "  Tag: ${{ needs.guard.outputs.tag }}"
+          echo "========================================"
+          terraform apply -input=false -auto-approve tfplan
+
+      - name: Validate Infrastructure
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          echo "========================================"
+          echo "  INFRASTRUCTURE VALIDATION"
+          echo "========================================"
+          OUTPUT=$(terraform output 2>&1)
+          if echo "$OUTPUT" | grep -q "No outputs found"; then
+            echo "No outputs defined yet — skipping output check"
+          else
+            echo "$OUTPUT"
+          fi
+          echo "========================================"
+          echo "  DEPLOY COMPLETE"
+          echo "  Tag         : ${{ needs.guard.outputs.tag }}"
+          echo "  Environment : ${{ needs.guard.outputs.environment }}"
+          echo "  Deployed by : ${{ github.actor }}"
+          echo "========================================"

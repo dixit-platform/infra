@@ -1,13 +1,10 @@
 terraform {
+  required_version = ">= 1.10.0"
+
   required_providers {
     aws = {
       source  = "hashicorp/aws"
       version = "~> 5.0"
-    }
-
-    random = {
-      source  = "hashicorp/random"
-      version = "~> 3.0"
     }
   }
 }
@@ -16,29 +13,16 @@ provider "aws" {
   region = "ap-south-1"
 }
 
-resource "random_id" "suffix" {
-  byte_length = 4
-}
+module "vpc" {
+  source = "../../modules/vpc"
 
-resource "aws_s3_bucket" "demo" {
-  bucket = "dev-demo-bucket-${random_id.suffix.hex}"
-}
-
-resource "aws_s3_bucket_public_access_block" "demo" {
-  bucket = aws_s3_bucket.demo.id
-
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
-}
-
-resource "aws_s3_bucket_server_side_encryption_configuration" "demo" {
-  bucket = aws_s3_bucket.demo.id
-
-  rule {
-    apply_server_side_encryption_by_default {
-      sse_algorithm = "AES256"
-    }
-  }
+  environment              = var.environment
+  project                  = var.project
+  vpc_cidr                 = var.vpc_cidr
+  azs                      = var.azs
+  public_subnet_cidrs      = var.public_subnet_cidrs
+  private_subnet_cidrs     = var.private_subnet_cidrs
+  enable_flow_logs         = var.enable_flow_logs
+  flow_logs_retention_days = var.flow_logs_retention_days
+  tags                     = var.tags
 }

@@ -1,10 +1,27 @@
 name: Destroy Infrastructure
- 
+
 # ─────────────────────────────────────────────────────────────
-# Manual only — destroys infrastructure deployed to an environment
-# Requires: target environment, the release tag that was deployed,
-#           typing DESTROY to confirm, and a reason for audit trail
+# ROLE IN THE PIPELINE:
+#   Manual only — destroys persistent infrastructure in an environment.
+#   Always runs against the exact tag that was deployed.
+#
+# HOW TO USE:
+#   1. Click "Run workflow"
+#   2. Under "Use workflow from" → select the TAG that was deployed
+#        e.g. dev-v1.0.3 / stage-v1.0.3 / v1.0.3
+#   3. Select target environment
+#   4. Type DESTROY to confirm
+#   5. Provide a reason — logged permanently in audit trail
+#
+# TAG RULES:
+#   dev-v*   → dev only
+#   stage-v* → stage only
+#   v*       → prod only
+#
+# APPROVAL GATES:
+#   All environments trigger GitHub approval gate before destroy runs.
 # ─────────────────────────────────────────────────────────────
+
 on:
   workflow_dispatch:
     inputs:
@@ -16,20 +33,16 @@ on:
           - dev
           - stage
           - prod
-      tag:
-        description: 'Release tag that was deployed (e.g. dev-v1.0.3, stage-v1.0.3, v1.0.3)'
-        required: true
       confirm:
         description: 'Type DESTROY to confirm — this is irreversible'
         required: true
       reason:
         description: 'Reason for destroying (logged for audit trail)'
         required: true
- 
+
 permissions:
-  contents: write
-  id-token: write
- 
+  contents: write   # needed for audit log commit to main
+
 jobs:
   # ──────────────────────────────────────────────
   # 1. Guard — validate all inputs before touching anything
@@ -42,53 +55,56 @@ jobs:
       environment: ${{ steps.resolve.outputs.environment }}
       tf_dir:      ${{ steps.resolve.outputs.tf_dir }}
       tag:         ${{ steps.resolve.outputs.tag }}
- 
+
     steps:
       - name: Validate and resolve
         id: resolve
         run: |
           ENVIRONMENT="${{ inputs.environment }}"
-          TAG="${{ inputs.tag }}"
+          TAG="${{ github.ref_name }}"   # tag selected under "Use workflow from"
           CONFIRM="${{ inputs.confirm }}"
           REASON="${{ inputs.reason }}"
- 
+
           # ── Confirmation check ────────────────────────────────
           if [[ "$CONFIRM" != "DESTROY" ]]; then
-            echo "❌ You must type DESTROY exactly to confirm."
-            echo "   You typed: '$CONFIRM'"
+            echo "You must type DESTROY exactly to confirm."
+            echo "You typed: '$CONFIRM'"
             exit 1
           fi
- 
+
           # ── Reason must not be empty or generic ───────────────
           if [[ -z "$REASON" || ${#REASON} -lt 10 ]]; then
-            echo "❌ Please provide a meaningful reason (at least 10 characters)."
-            echo "   You typed: '$REASON'"
+            echo "Please provide a meaningful reason (at least 10 characters)."
+            echo "You typed: '$REASON'"
             exit 1
           fi
- 
-          # ── Tag must match environment ────────────────────────
+
+          # ── Tag must match target environment ─────────────────
+          # dev-v*   → dev only
+          # stage-v* → stage only
+          # v*       → prod only
           if [[ "$ENVIRONMENT" == "dev" && "$TAG" != dev-v* ]]; then
-            echo "❌ Dev environment expects a dev-v* tag. Got: $TAG"
+            echo "Dev environment expects a dev-v* tag. Got: $TAG"
             exit 1
           fi
- 
+
           if [[ "$ENVIRONMENT" == "stage" && "$TAG" != stage-v* ]]; then
-            echo "❌ stage environment expects a stage-v* tag. Got: $TAG"
+            echo "Stage environment expects a stage-v* tag. Got: $TAG"
             exit 1
           fi
- 
-          if [[ "$ENVIRONMENT" == "prod" && "$TAG" != v* ]]; then
-            echo "❌ Prod environment expects a v* tag (e.g. v1.0.3). Got: $TAG"
+
+          if [[ "$ENVIRONMENT" == "prod" && "$TAG" != v[0-9]* ]]; then
+            echo "Prod environment expects a v* tag (e.g. v1.0.3). Got: $TAG"
             exit 1
           fi
- 
+
           # ── Resolve terraform directory ───────────────────────
           TF_DIR="terraform/environments/${ENVIRONMENT}"
- 
+
           echo "environment=$ENVIRONMENT" >> $GITHUB_OUTPUT
           echo "tf_dir=$TF_DIR"           >> $GITHUB_OUTPUT
           echo "tag=$TAG"                 >> $GITHUB_OUTPUT
- 
+
           echo "========================================"
           echo "  DESTROY PLAN"
           echo "  Environment : $ENVIRONMENT"
@@ -97,71 +113,82 @@ jobs:
           echo "  Triggered by: ${{ github.actor }}"
           echo "  Reason      : $REASON"
           echo "========================================"
- 
+
   # ──────────────────────────────────────────────
-  # 2. Audit log — record the destroy event before anything runs
+  # 2. Audit log — record destroy event before anything runs
+  #
+  #    Checks out main explicitly to avoid detached HEAD state.
+  #    Runner checks out tags which puts git in detached HEAD —
+  #    git push origin HEAD fails in that state, so we always
+  #    checkout and push to main by name.
   # ──────────────────────────────────────────────
   audit-log:
     name: Audit Log
     needs: guard
     runs-on: [self-hosted, Linux, X64, terraform]
- 
+
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Checkout main branch
+        uses: actions/checkout@v5
         with:
+          ref: main
           fetch-depth: 0
- 
+
       - name: Write audit entry
         run: |
           mkdir -p .github/audit
           AUDIT_FILE=".github/audit/destroy-log.md"
- 
-          # Create file with header if it doesn't exist
+
           if [ ! -f "$AUDIT_FILE" ]; then
-            echo "# Destroy Audit Log" > $AUDIT_FILE
-            echo "" >> $AUDIT_FILE
-            echo "| Timestamp | Actor | Environment | Tag | Reason | Run |" >> $AUDIT_FILE
-            echo "|-----------|-------|-------------|-----|--------|-----|" >> $AUDIT_FILE
+            echo "# Destroy Audit Log"                                                    > $AUDIT_FILE
+            echo ""                                                                       >> $AUDIT_FILE
+            echo "| Timestamp | Actor | Environment | Tag | Reason | Run |"              >> $AUDIT_FILE
+            echo "|-----------|-------|-------------|-----|--------|-----|"               >> $AUDIT_FILE
           fi
- 
-          # Append new entry
+
           echo "| $(date -u '+%Y-%m-%d %H:%M UTC') | ${{ github.actor }} | ${{ needs.guard.outputs.environment }} | ${{ needs.guard.outputs.tag }} | ${{ inputs.reason }} | [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |" >> $AUDIT_FILE
- 
+
           git config user.name  "${{ github.actor }}"
           git config user.email "${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com"
           git add .github/audit/destroy-log.md
           git commit -m "audit: destroy ${{ needs.guard.outputs.tag }} from ${{ needs.guard.outputs.environment }} by ${{ github.actor }}"
-          git push origin HEAD
- 
-          echo "Audit entry written ✅"
- 
+          git push origin main   # always push to named branch — never HEAD
+
+          echo "========================================"
+          echo "  AUDIT ENTRY WRITTEN"
+          echo "  File: .github/audit/destroy-log.md"
+          echo "========================================"
+
   # ──────────────────────────────────────────────
-  # 3. Destroy — checkout the exact tag and destroy
+  # 3. Destroy — checkout exact tag and destroy
+  #
+  #    environment: triggers GitHub approval gate before
+  #    destroy runs. Audit log is always written first
+  #    regardless of whether destroy is approved or not.
   # ──────────────────────────────────────────────
   destroy:
     name: Destroy ${{ needs.guard.outputs.environment }} (${{ needs.guard.outputs.tag }})
     needs: [guard, audit-log]
     runs-on: [self-hosted, Linux, X64, terraform]
-    environment: ${{ needs.guard.outputs.environment }}   # triggers GitHub approval gate
+    environment: ${{ needs.guard.outputs.environment }}   # approval gate for all envs
     env:
       TF_DIR: ${{ needs.guard.outputs.tf_dir }}
       AWS_DEFAULT_REGION: ap-south-1
- 
+
     steps:
       - name: Checkout at tag
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ needs.guard.outputs.tag }}   # destroy exactly what was deployed
           fetch-depth: 0
- 
+
       - name: Verify Terraform
         run: terraform version
- 
+
       - name: Terraform Init
         working-directory: ${{ env.TF_DIR }}
         run: terraform init -input=false
- 
+
       - name: Terraform Plan Destroy
         working-directory: ${{ env.TF_DIR }}
         run: |
@@ -170,7 +197,7 @@ jobs:
           echo "========================================"
           terraform plan -destroy -input=false
           echo "Plan complete — review above before apply"
- 
+
       - name: Terraform Destroy
         working-directory: ${{ env.TF_DIR }}
         run: |
@@ -181,11 +208,11 @@ jobs:
           echo "  Actor  : ${{ github.actor }}"
           echo "========================================"
           terraform destroy -input=false -auto-approve
- 
+
       - name: Confirm destroy complete
         run: |
           echo "========================================"
-          echo "  DESTROY COMPLETE ✅"
+          echo "  DESTROY COMPLETE"
           echo "  Environment : ${{ needs.guard.outputs.environment }}"
           echo "  Tag         : ${{ needs.guard.outputs.tag }}"
           echo "  Destroyed by: ${{ github.actor }}"
