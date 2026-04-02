@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - '**'
+      - '!dev'
+      - '!stage'
+      - '!main'
   pull_request:
     branches:
       - dev
@@ -14,50 +17,9 @@ permissions:
   contents: read
 
 jobs:
-  resolve-context:
-    name: Resolve Environment
-    runs-on: [self-hosted, Linux, X64, terraform]
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    outputs:
-      environment: ${{ steps.resolve.outputs.environment }}
-      tf_dir: ${{ steps.resolve.outputs.tf_dir }}
-
-    steps:
-      - name: Resolve target environment
-        id: resolve
-        run: |
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            REF="${{ github.base_ref }}"
-          else
-            REF="${{ github.ref_name }}"
-          fi
-
-          if [[ "$REF" == "dev" ]]; then
-            ENVIRONMENT="dev"
-            TF_DIR="terraform/environments/dev"
-          elif [[ "$REF" == "stage" ]]; then
-            ENVIRONMENT="stage"
-            TF_DIR="terraform/environments/stage"
-          elif [[ "$REF" == "main" ]]; then
-            ENVIRONMENT="prod"
-            TF_DIR="terraform/environments/prod"
-          else
-            ENVIRONMENT="dev"
-            TF_DIR="terraform/environments/dev"
-          fi
-
-          echo "environment=$ENVIRONMENT" >> "$GITHUB_OUTPUT"
-          echo "tf_dir=$TF_DIR" >> "$GITHUB_OUTPUT"
-
-          echo "Event       : ${{ github.event_name }}"
-          echo "Ref         : $REF"
-          echo "Environment : $ENVIRONMENT"
-          echo "TF Dir      : $TF_DIR"
-
   lint:
     name: Lint & Validate
     runs-on: [self-hosted, Linux, X64, terraform]
-    needs: resolve-context
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
 
     steps:
@@ -68,14 +30,19 @@ jobs:
         run: terraform fmt -check -recursive terraform
 
       - name: Terraform Validate
-        working-directory: ${{ needs.resolve-context.outputs.tf_dir }}
         run: |
-          terraform init -backend=false -input=false
-          terraform validate
+          for dir in terraform/environments/dev terraform/environments/stage terraform/environments/prod; do
+            echo "Validating $dir"
+            terraform -chdir=$dir init -backend=false -input=false
+            terraform -chdir=$dir validate
+          done
 
       - name: TFLint
-        working-directory: ${{ needs.resolve-context.outputs.tf_dir }}
-        run: tflint
+        run: |
+          for dir in terraform/environments/dev terraform/environments/stage terraform/environments/prod; do
+            echo "TFLint $dir"
+            tflint --chdir=$dir
+          done
 
   security:
     name: Security Scan
@@ -103,19 +70,30 @@ jobs:
             --skip-check CKV_AWS_18,CKV_AWS_21,CKV_AWS_144,CKV_AWS_145,CKV2_AWS_61,CKV2_AWS_62,CKV2_AWS_64,CKV_AWS_7,CKV_AWS_158,CKV_AWS_338,CKV_AWS_290,CKV_AWS_355
 
   plan:
-    name: Terraform Plan
+    name: Terraform Plan (${{ matrix.environment }})
     runs-on: [self-hosted, Linux, X64, terraform]
-    needs: [resolve-context, security]
+    needs: security
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - environment: dev
+            tf_dir: terraform/environments/dev
+          - environment: stage
+            tf_dir: terraform/environments/stage
+          - environment: prod
+            tf_dir: terraform/environments/prod
 
     steps:
       - name: Checkout
         uses: actions/checkout@v5
 
       - name: Terraform Init
-        working-directory: ${{ needs.resolve-context.outputs.tf_dir }}
+        working-directory: ${{ matrix.tf_dir }}
         run: terraform init -input=false
 
       - name: Terraform Plan
-        working-directory: ${{ needs.resolve-context.outputs.tf_dir }}
+        working-directory: ${{ matrix.tf_dir }}
         run: terraform plan -no-color -input=false

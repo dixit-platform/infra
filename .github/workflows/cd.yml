@@ -1,5 +1,21 @@
 name: CD Pipeline
 
+# ─────────────────────────────────────────────────────────────
+# ROLE IN THE PIPELINE:
+#   This workflow ONLY does two things:
+#   1. Ephemeral apply+destroy — proves the code actually works
+#   2. Creates a release tag — the deployable artifact
+#
+#   It does NOT do persistent deploys. That is done by:
+#   - auto-deploy.yml  → triggered by dev-v* tag  → deploys dev
+#   - deploy.yml       → manual trigger            → deploys stage/prod
+#
+# TAG CHAIN:
+#   merge to dev   → ephemeral dev cycle   → creates dev-v*
+#   merge to stage → ephemeral stage cycle → creates stage-v*
+#   merge to main  → ephemeral prod cycle  → creates v*
+# ─────────────────────────────────────────────────────────────
+
 on:
   push:
     branches:
@@ -8,12 +24,11 @@ on:
       - main
 
 permissions:
-  contents: write  # needed to create release tags
-  id-token: write
+  contents: write   # needed to create and push release tags
 
 jobs:
   # ──────────────────────────────────────────────
-  # 1. Determine which environment to target
+  # 1. Resolve environment from branch
   # ──────────────────────────────────────────────
   set-env:
     name: Set Environment
@@ -23,68 +38,82 @@ jobs:
       environment: ${{ steps.resolve.outputs.environment }}
       tag_prefix:  ${{ steps.resolve.outputs.tag_prefix }}
       tf_dir:      ${{ steps.resolve.outputs.tf_dir }}
+
     steps:
       - name: Resolve environment from branch
         id: resolve
         run: |
           if [[ "${{ github.ref_name }}" == "main" ]]; then
-            echo "environment=prod"                          >> $GITHUB_OUTPUT
-            echo "tag_prefix=v"                             >> $GITHUB_OUTPUT
-            echo "tf_dir=terraform/environments/prod"       >> $GITHUB_OUTPUT
+            ENVIRONMENT="prod"
+            TAG_PREFIX="v"
+            TF_DIR="terraform/environments/prod"
           elif [[ "${{ github.ref_name }}" == "stage" ]]; then
-            echo "environment=stage"                        >> $GITHUB_OUTPUT
-            echo "tag_prefix=stage-v"                       >> $GITHUB_OUTPUT
-            echo "tf_dir=terraform/environments/stage"      >> $GITHUB_OUTPUT
+            ENVIRONMENT="stage"
+            TAG_PREFIX="stage-v"
+            TF_DIR="terraform/environments/stage"
           else
-            echo "environment=dev"                          >> $GITHUB_OUTPUT
-            echo "tag_prefix=dev-v"                         >> $GITHUB_OUTPUT
-            echo "tf_dir=terraform/environments/dev"        >> $GITHUB_OUTPUT
+            ENVIRONMENT="dev"
+            TAG_PREFIX="dev-v"
+            TF_DIR="terraform/environments/dev"
           fi
 
+          echo "environment=$ENVIRONMENT" >> $GITHUB_OUTPUT
+          echo "tag_prefix=$TAG_PREFIX"   >> $GITHUB_OUTPUT
+          echo "tf_dir=$TF_DIR"           >> $GITHUB_OUTPUT
+
+          echo "========================================"
+          echo "  CD CONTEXT"
+          echo "  Branch      : ${{ github.ref_name }}"
+          echo "  Environment : $ENVIRONMENT"
+          echo "  Tag Prefix  : $TAG_PREFIX"
+          echo "  TF Dir      : $TF_DIR"
+          echo "  Triggered by: ${{ github.actor }}"
+          echo "========================================"
+
   # ──────────────────────────────────────────────
-  # 2. Ephemeral deploy: plan → apply → validate → destroy
+  # 2. Ephemeral cycle: init → plan → apply → validate → destroy
+  #
+  #    No approval gate here — this is validation only.
+  #    Approval gates live in deploy.yml for persistent deploys.
+  #    destroy runs with if: always() so infra is never left up
+  #    even if validate fails.
   # ──────────────────────────────────────────────
-  deploy:
+  ephemeral-deploy:
     name: Ephemeral Deploy (${{ needs.set-env.outputs.environment }})
     needs: set-env
     runs-on: [self-hosted, Linux, X64, terraform]
-    environment: ${{ needs.set-env.outputs.environment }}   # triggers approval gate for stage/prod
     env:
       TF_DIR: ${{ needs.set-env.outputs.tf_dir }}
       AWS_DEFAULT_REGION: ap-south-1
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5         # v5 — Node.js 24, no deprecation warning
+        uses: actions/checkout@v5
 
       - name: Verify Terraform
         run: terraform version
 
-      # ── Init ──────────────────────────────────
       - name: Terraform Init
         working-directory: ${{ env.TF_DIR }}
         run: terraform init -input=false
 
-      # ── Plan ──────────────────────────────────
-      # Always run a fresh plan — no artifact download needed.
-      # CD runs on merge (not PR), so no CI artifact exists at this point.
-      # Fresh plan is also safer — always reflects current state.
+      # Fresh plan — never reuse CI plan artifact.
+      # CD runs post-merge so no CI artifact exists at this point.
+      # Fresh plan also guarantees we see current state.
       - name: Terraform Plan
         working-directory: ${{ env.TF_DIR }}
         run: |
           terraform plan -input=false -out=tfplan
-          echo "Plan complete ✅"
+          echo "Plan complete"
 
-      # ── Apply ─────────────────────────────────
       - name: Terraform Apply
         working-directory: ${{ env.TF_DIR }}
         run: |
           echo "========================================"
-          echo "  APPLYING — ${{ needs.set-env.outputs.environment }}"
+          echo "  EPHEMERAL APPLY — ${{ needs.set-env.outputs.environment }}"
           echo "========================================"
           terraform apply -input=false -auto-approve tfplan
 
-      # ── Validate infra (smoke test) ───────────
       - name: Validate Infrastructure
         working-directory: ${{ env.TF_DIR }}
         run: |
@@ -93,16 +122,16 @@ jobs:
           echo "========================================"
           OUTPUT=$(terraform output 2>&1)
           if echo "$OUTPUT" | grep -q "No outputs found"; then
-            echo "ℹ️  No outputs defined yet — skipping output check"
+            echo "No outputs defined yet — skipping output check"
           else
             echo "$OUTPUT"
           fi
-          echo "Validation complete ✅"
+          echo "Validation complete"
 
-      # ── Destroy (ephemeral — zero long-term cost) ──
+      # Always destroy — ephemeral by design, zero long-term cost
       - name: Terraform Destroy
         working-directory: ${{ env.TF_DIR }}
-        if: always()   # destroy even if validate step fails
+        if: always()
         run: |
           echo "========================================"
           echo "  DESTROYING EPHEMERAL INFRASTRUCTURE"
@@ -110,26 +139,30 @@ jobs:
           terraform destroy -input=false -auto-approve
 
   # ──────────────────────────────────────────────
-  # 3. Create release tag after successful deploy+destroy
+  # 3. Create release tag after successful ephemeral cycle
+  #
+  #    Tag is the deployable artifact — nothing deploys without one.
+  #    dev-v*   → picked up automatically by auto-deploy.yml
+  #    stage-v* → picked up manually via deploy.yml
+  #    v*       → picked up manually via deploy.yml
   # ──────────────────────────────────────────────
   tag-release:
     name: Tag Release
-    needs: [set-env, deploy]
+    needs: [set-env, ephemeral-deploy]
     runs-on: [self-hosted, Linux, X64, terraform]
     if: success() && github.event.repository.full_name == github.repository
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5         # v5 — Node.js 24
+        uses: actions/checkout@v5
         with:
-          fetch-depth: 0   # needed to read existing tags
+          fetch-depth: 0   # needed to read all existing tags
 
       - name: Generate next version tag
         id: version
         run: |
           PREFIX="${{ needs.set-env.outputs.tag_prefix }}"
 
-          # Find the latest tag matching this prefix and bump patch version
           LATEST=$(git tag --list "${PREFIX}*" --sort=-v:refname | head -n 1)
 
           if [ -z "$LATEST" ]; then
@@ -153,13 +186,8 @@ jobs:
           git push origin ${{ steps.version.outputs.tag }}
           echo "========================================"
           echo "  RELEASE TAG CREATED"
-          echo "  ${{ steps.version.outputs.tag }}"
+          echo "  Tag         : ${{ steps.version.outputs.tag }}"
+          echo "  Environment : ${{ needs.set-env.outputs.environment }}"
+          echo "  Commit      : ${{ github.sha }}"
+          echo "  Triggered by: ${{ github.actor }}"
           echo "========================================"
-
-      - name: Print release summary
-        run: |
-          echo "✅ CD Pipeline complete"
-          echo "   Environment : ${{ needs.set-env.outputs.environment }}"
-          echo "   Release tag : ${{ steps.version.outputs.tag }}"
-          echo "   Commit      : ${{ github.sha }}"
-          echo "   Triggered by: ${{ github.actor }}"
