@@ -148,11 +148,23 @@ jobs:
 
           echo "| $(date -u '+%Y-%m-%d %H:%M UTC') | ${{ github.actor }} | ${{ needs.guard.outputs.environment }} | ${{ needs.guard.outputs.tag }} | ${{ inputs.reason }} | [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |" >> $AUDIT_FILE
 
+          # Configure git (same as yours)
           git config user.name  "${{ github.actor }}"
           git config user.email "${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com"
+
+          # Create/switch to audit branch BEFORE commit
+          AUDIT_BRANCH="audit-logs"
+
+          git fetch origin || true
+          git checkout $AUDIT_BRANCH || git checkout -b $AUDIT_BRANCH
+          git pull origin $AUDIT_BRANCH || true
+
+          # Your existing commands (unchanged)
           git add .github/audit/destroy-log.md
-          git commit -m "audit: destroy ${{ needs.guard.outputs.tag }} from ${{ needs.guard.outputs.environment }} by ${{ github.actor }}"
-          git push origin main   # always push to named branch — never HEAD
+          git commit -m "audit: destroy ${{ needs.guard.outputs.tag }} from ${{ needs.guard.outputs.environment }} by ${{ github.actor }}" || echo "No changes"
+
+          # Push to audit branch instead of main
+          git push origin $AUDIT_BRANCH
 
           echo "========================================"
           echo "  AUDIT ENTRY WRITTEN"
