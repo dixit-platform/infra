@@ -1,0 +1,31 @@
+{
+  "aws_region": "ap-south-1",
+  "vpc_id": "vpc-08258113ff76b94e7",
+  "ec2_tag": {
+    "key": "Name",
+    "value": "github-actions-runner"
+  },
+  "endpoints": [
+    {
+      "name": "runner-ssm",
+      "service_name": "com.amazonaws.ap-south-1.ssm",
+      "subnets": ["subnet-048713fb55237a541"],
+      "security_groups": ["sg-082eafa778880f861"],
+      "private_dns_enabled": true
+    },
+    {
+      "name": "runner-ssmmessages",
+      "service_name": "com.amazonaws.ap-south-1.ssmmessages",
+      "subnets": ["subnet-048713fb55237a541"],
+      "security_groups": ["sg-082eafa778880f861"],
+      "private_dns_enabled": true
+    },
+    {
+      "name": "runner-ec2messages",
+      "service_name": "com.amazonaws.ap-south-1.ec2messages",
+      "subnets": ["subnet-048713fb55237a541"],
+      "security_groups": ["sg-082eafa778880f861"],
+      "private_dns_enabled": true
+    }
+  ]
+}

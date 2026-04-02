@@ -1,0 +1,106 @@
+name: Auto Deploy - Dev
+
+# ─────────────────────────────────────────────────────────────
+# ROLE IN THE PIPELINE:
+#   Triggered automatically when cd.yml creates a dev-v* tag.
+#   Persistent deploy to dev only. No manual trigger here —
+#   use deploy.yml if you need to manually redeploy dev.
+#
+# FLOW:
+#   cd.yml creates dev-v* tag
+#         ↓ triggers this workflow
+#   checkout at tag → init → plan → apply → validate
+# ─────────────────────────────────────────────────────────────
+
+on:
+  push:
+    tags:
+      - 'dev-v*'
+
+permissions:
+  contents: read
+
+jobs:
+  # ──────────────────────────────────────────────
+  # 1. Guard — reject forks
+  # ──────────────────────────────────────────────
+  guard:
+    name: Validate
+    runs-on: [self-hosted, Linux, X64, terraform]
+    if: github.event.repository.full_name == github.repository
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+
+    steps:
+      - name: Resolve tag
+        id: resolve
+        run: |
+          TAG="${{ github.ref_name }}"
+
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+          echo "========================================"
+          echo "  AUTO DEPLOY — DEV"
+          echo "  Tag         : $TAG"
+          echo "  Triggered by: ${{ github.actor }}"
+          echo "========================================"
+
+  # ──────────────────────────────────────────────
+  # 2. Deploy — persistent deploy to dev at exact tag
+  # ──────────────────────────────────────────────
+  deploy:
+    name: Deploy ${{ needs.guard.outputs.tag }} → dev
+    needs: guard
+    runs-on: [self-hosted, Linux, X64, terraform]
+    environment: dev
+    env:
+      TF_DIR: terraform/environments/dev
+      AWS_DEFAULT_REGION: ap-south-1
+
+    steps:
+      - name: Checkout at tag
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.guard.outputs.tag }}   # always deploy the exact tag, never HEAD
+          fetch-depth: 0
+
+      - name: Verify Terraform
+        run: terraform version
+
+      - name: Terraform Init
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform init -input=false
+
+      - name: Terraform Plan
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform plan -input=false -out=tfplan
+          echo "Plan complete"
+
+      - name: Terraform Apply
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          echo "========================================"
+          echo "  DEPLOYING TO DEV"
+          echo "  Tag: ${{ needs.guard.outputs.tag }}"
+          echo "========================================"
+          terraform apply -input=false -auto-approve tfplan
+
+      - name: Validate Infrastructure
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          echo "========================================"
+          echo "  INFRASTRUCTURE VALIDATION"
+          echo "========================================"
+          OUTPUT=$(terraform output 2>&1)
+          if echo "$OUTPUT" | grep -q "No outputs found"; then
+            echo "No outputs defined yet — skipping output check"
+          else
+            echo "$OUTPUT"
+          fi
+          echo "========================================"
+          echo "  AUTO DEPLOY COMPLETE"
+          echo "  Tag         : ${{ needs.guard.outputs.tag }}"
+          echo "  Environment : dev"
+          echo "  Deployed by : ${{ github.actor }}"
+          echo "========================================"
